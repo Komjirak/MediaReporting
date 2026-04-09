@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}설정{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width:760px">
+
+  <div style="margin-bottom:24px">
+    <h2 style="font-size:18px;font-weight:700">⚙ 모니터링 설정</h2>
+    <p style="color:var(--muted);font-size:13px;margin-top:4px">
+      변경사항은 .env 파일에 저장되며 다음 수집 실행부터 즉시 반영됩니다.
+    </p>
+  </div>
+
+  {% if saved %}
+  <div class="alert alert-success">✓ 설정이 저장되었습니다. 다음 수집부터 반영됩니다.</div>
+  {% endif %}
+
+  {% for err in errors %}
+  <div class="alert alert-error">{{ err }}</div>
+  {% endfor %}
+
+  <form method="post">
+
+    <!-- 회사 정보 -->
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-header"><span class="card-title">🏢 회사 정보</span></div>
+      <div class="card-body">
+
+        <div class="form-group">
+          <label class="form-label">회사명</label>
+          <input class="form-input" type="text" name="company_name"
+                 value="{{ env.COMPANY_NAME or '' }}" placeholder="예: 라인플러스">
+          <div class="form-hint">리포트 헤더 및 알림에 표시됩니다.</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">검색 키워드</label>
+          <textarea class="form-input" name="keywords"
+                    placeholder="예: 라인플러스, LINE Plus, LY Corporation, 라인게임즈">{{ env.KEYWORDS or '' }}</textarea>
+          <div class="form-hint">쉼표(,)로 구분. 구체적일수록 정확도가 높아집니다. <code>LINE</code>처럼 단어가 짧으면 무관한 기사가 섞입니다.</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 리스크 키워드 -->
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-header"><span class="card-title">🚨 리스크 키워드</span></div>
+      <div class="card-body">
+
+        <div class="form-group">
+          <label class="form-label">
+            <span class="badge badge-CRITICAL" style="margin-right:6px">CRITICAL</span>
+            즉시 알림 키워드
+          </label>
+          <input class="form-input" type="text" name="risk_critical"
+                 value="{{ env.RISK_KEYWORDS_CRITICAL or '' }}"
+                 placeholder="예: 기소,구속,파산,사망">
+          <div class="form-hint">쉼표 구분. 발견 즉시 Slack·이메일 알림 발송.</div>
+        </div>
+
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">
+            <span class="badge badge-HIGH" style="margin-right:6px">HIGH</span>
+            고위험 키워드
+          </label>
+          <input class="form-input" type="text" name="risk_high"
+                 value="{{ env.RISK_KEYWORDS_HIGH or '' }}"
+                 placeholder="예: 소송,벌금,리콜,수사,징계">
+          <div class="form-hint">쉼표 구분. 실시간 모니터에서 즉시 알림 발송.</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 수집 설정 -->
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-header"><span class="card-title">⏱ 수집 설정</span></div>
+      <div class="card-body">
+
+        <div class="form-group" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <label class="form-label">실시간 모니터 간격 (초)</label>
+            <input class="form-input" type="number" name="monitor_interval"
+                   value="{{ env.MONITOR_INTERVAL_SECONDS or '300' }}" min="60" max="3600">
+            <div class="form-hint">기본 300초 (5분). 최소 60초.</div>
+          </div>
+          <div>
+            <label class="form-label">수집 기간 (시간)</label>
+            <input class="form-input" type="number" name="collect_hours"
+                   value="{{ env.COLLECT_HOURS_BACK or '6' }}" min="1" max="48">
+            <div class="form-hint">각 정기 실행 시 최근 N시간 기사 수집.</div>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">정기 실행 스케줄</label>
+          <div style="display:flex;gap:8px">
+            {% for t in [('03:00','03시 새벽'),('09:00','09시 오전'),('15:00','15시 오후')] %}
+            <div style="flex:1;padding:12px;background:var(--surface2);border:1px solid var(--border);
+                        border-radius:8px;text-align:center">
+              <div style="font-size:20px;font-weight:700;color:var(--accent)">{{ t[0] }}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px">{{ t[1] }}</div>
+            </div>
+            {% endfor %}
+          </div>
+          <div class="form-hint" style="margin-top:8px">스케줄은 KST 기준 고정입니다. 변경하려면 config.py를 수정하세요.</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- API / 알림 설정 (읽기 전용 표시) -->
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-header"><span class="card-title">🔑 API / 알림 연결 상태</span></div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          {% set checks = [
+            ('Naver API', env.NAVER_CLIENT_ID),
+            ('Gemini API', env.GEMINI_API_KEY or env.Gemini_API_KEY),
+            ('Slack Webhook', env.SLACK_WEBHOOK_URL),
+            ('Gmail SMTP', env.SMTP_USER),
+          ] %}
+          {% for name, val in checks %}
+          <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;
+                      background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+            {% if val %}
+            <span style="color:var(--green)">●</span>
+            {% else %}
+            <span style="color:#f85149">●</span>
+            {% endif %}
+            <span style="font-size:13px">{{ name }}</span>
+            <span style="font-size:11px;color:var(--muted);margin-left:auto">
+              {% if val %}연결됨{% else %}미설정{% endif %}
+            </span>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="form-hint" style="margin-top:12px">
+          API 키 변경은 보안상 .env 파일을 직접 수정해주세요.
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <button type="submit" class="btn btn-primary" style="padding:10px 28px;font-size:14px">
+        💾 저장하기
+      </button>
+      <a href="/" class="btn" style="padding:10px 20px;font-size:14px">취소</a>
+    </div>
+
+  </form>
+
+  <!-- 초기화 -->
+  <div class="card" style="margin-top:32px;border-color:rgba(248,81,73,.3)">
+    <div class="card-header" style="border-color:rgba(248,81,73,.2)">
+      <span class="card-title" style="color:#f85149">⚠ 위험 구역</span>
+    </div>
+    <div class="card-body">
+      <p style="font-size:13px;color:var(--muted);margin-bottom:16px">
+        키워드를 변경한 경우, 기존 수집 데이터를 전부 삭제하고 새 키워드로 처음부터 수집합니다.<br>
+        <strong style="color:var(--text)">기사, 일간 로그, 리포트 이력이 모두 삭제됩니다. 되돌릴 수 없습니다.</strong>
+      </p>
+      <button class="btn" onclick="resetAndRun()"
+              style="border-color:rgba(248,81,73,.5);color:#f85149;padding:10px 20px;font-size:14px"
+              id="reset-btn">
+        🗑 DB 초기화 후 새로 수집
+      </button>
+    </div>
+  </div>
+
+  <script>
+  function resetAndRun() {
+    if (!confirm('기존 수집 데이터를 전부 삭제하고 새로 수집합니다.\n정말 초기화하시겠습니까?')) return;
+    const btn = document.getElementById('reset-btn');
+    btn.textContent = '초기화 중...'; btn.disabled = true;
+    fetch('/api/reset-and-run', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        btn.textContent = `✓ 완료 (${d.deleted}건 삭제, 수집 시작)`;
+        setTimeout(() => { window.location.href = '/feed'; }, 2000);
+      })
+      .catch(() => { btn.textContent = '오류 발생'; btn.disabled = false; });
+  }
+  </script>
+</div>
+{% endblock %}

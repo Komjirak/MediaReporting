@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}피드 - {{ date_str }}{% endblock %}
+
+{% block content %}
+<div class="container">
+
+  <!-- 필터 바 -->
+  <div class="filter-bar">
+    <form method="get" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;width:100%">
+      <input type="date" name="date" value="{{ date_str }}"
+             class="filter-select" onchange="this.form.submit()">
+
+      <select name="kw" class="filter-select" onchange="this.form.submit()">
+        <option value="">전체 키워드</option>
+        {% for kw in keywords %}
+        <option value="{{ kw }}" {% if keyword_filter==kw %}selected{% endif %}>{{ kw }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="risk" class="filter-select" onchange="this.form.submit()">
+        <option value="">전체 리스크</option>
+        {% for lvl in ['CRITICAL','HIGH','MEDIUM','LOW'] %}
+        <option value="{{ lvl }}" {% if risk_filter==lvl %}selected{% endif %}>{{ lvl }}</option>
+        {% endfor %}
+      </select>
+
+      <span style="color:var(--muted);font-size:13px;margin-left:auto">
+        {{ articles|length }}건
+      </span>
+    </form>
+  </div>
+
+  <!-- 날짜 네비게이션 -->
+  {% if dates %}
+  <div style="display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap">
+    {% for d in dates %}
+    <a href="/feed?date={{ d }}"
+       style="padding:4px 12px;border-radius:20px;font-size:12px;border:1px solid var(--border);
+              background:{% if d==date_str %}var(--accent){% else %}var(--surface){% endif %};
+              color:{% if d==date_str %}#000{% else %}var(--muted){% endif %}">
+      {{ d }}
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- Slack 스타일 피드 -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">
+        📅 {{ date_str }} 기사 피드
+        <span style="color:var(--muted);font-weight:400;font-size:12px">— 정확도 랭킹순</span>
+      </span>
+    </div>
+    <div class="card-body" style="padding:12px 18px">
+
+      {% set risk_icons = {'CRITICAL':'🔴','HIGH':'🟠','MEDIUM':'🟡','LOW':'🟢'} %}
+
+      {% if articles %}
+        {% set ns = namespace(cur_hour='') %}
+        {% for art in articles %}
+          {% set hour = art.published_at[:13]|replace('T',' ') %}
+          {% if hour != ns.cur_hour %}
+            {% set ns.cur_hour = hour %}
+            <div class="feed-day-header" style="margin:20px 0 12px">
+              <div class="feed-day-line"></div>
+              <span class="feed-day-label">{{ hour }}시</span>
+              <div class="feed-day-line"></div>
+            </div>
+          {% endif %}
+
+          <div class="feed-msg">
+            <div class="feed-icon {{ art.risk_level }}">
+              {{ risk_icons.get(art.risk_level, '🟢') }}
+            </div>
+            <div class="feed-content">
+              <div class="ftitle">
+                <span class="badge badge-{{ art.risk_level }}" style="margin-right:6px">{{ art.risk_level }}</span>
+                <a href="{{ art.url }}" target="_blank" rel="noopener noreferrer">{{ art.title }}</a>
+              </div>
+              <div class="fmeta">
+                <span class="src" style="background:var(--surface2);padding:1px 7px;border-radius:4px;color:var(--accent)">{{ art.source }}</span>
+                <span>{{ art.published_at[:16]|replace('T',' ') }}</span>
+                <span>{{ art.category or '-' }}</span>
+                <span>키워드: <strong>{{ art.keyword }}</strong></span>
+                {% if art._score %}<span style="color:var(--purple)">score {{ art._score }}</span>{% endif %}
+              </div>
+              {% if art.summary_ko %}
+              <div class="fsum">{{ art.summary_ko }}</div>
+              {% elif art.description %}
+              <div class="fsum">{{ art.description[:200] }}</div>
+              {% endif %}
+              {% if art.risk_reason %}
+              <div style="font-size:11px;color:#f85149;margin-top:4px">⚠ {{ art.risk_reason }}</div>
+              {% endif %}
+            </div>
+          </div>
+
+        {% endfor %}
+      {% else %}
+        <p style="color:var(--muted);text-align:center;padding:60px 0">
+          {{ date_str }} 수집된 기사가 없습니다.
+        </p>
+      {% endif %}
+
+    </div>
+  </div>
+</div>
+{% endblock %}

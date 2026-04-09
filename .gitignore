@@ -1,0 +1,18 @@
+.vercel
+
+# Environment / secrets
+.env
+
+# Python cache / virtualenv
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime data
+data/
+logs/
+reports/
+
+# OS/editor
+.DS_Store
+.claude/

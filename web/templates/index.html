@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}대시보드{% endblock %}
+
+{% block content %}
+<div class="container">
+
+  <!-- 리스크 요약 카드 -->
+  {% if daily %}
+  <div class="risk-row">
+    <div class="risk-card c"><div class="num">{{ daily.critical_count }}</div><div class="lbl">CRITICAL</div></div>
+    <div class="risk-card h"><div class="num">{{ daily.high_count }}</div><div class="lbl">HIGH</div></div>
+    <div class="risk-card m"><div class="num">{{ daily.medium_count }}</div><div class="lbl">MEDIUM</div></div>
+    <div class="risk-card l"><div class="num">{{ daily.low_count }}</div><div class="lbl">LOW</div></div>
+    <div class="risk-card"><div class="num" style="color:var(--accent)">{{ daily.total_articles }}</div><div class="lbl">총 기사</div></div>
+    <div class="risk-card"><div class="num" style="color:var(--muted)">{{ daily.run_count }}</div><div class="lbl">수집 횟수</div></div>
+  </div>
+
+  {% if daily.audit_flags %}
+  <div style="margin-bottom:20px">
+    {% for f in daily.audit_flags %}
+    {% set is_error = f.severity == 'ERROR' %}
+    <div class="alert {% if is_error %}alert-error{% else %}" style="background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);color:var(--yellow){% endif %}">
+      {{ '⛔' if is_error else '⚠️' }}
+      <strong>[{{ f.type or f.flag_type }}]</strong> {{ f.detail or f.flag_detail }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  <div class="grid-2">
+    <!-- 기사 목록 (랭킹 순) -->
+    <div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">오늘 기사 <span style="color:var(--muted);font-weight:400;font-size:12px">— 정확도 랭킹순</span></span>
+          <a href="/feed" style="font-size:12px;color:var(--accent)">전체 피드 →</a>
+        </div>
+        <div class="card-body">
+          {% if articles %}
+          {% for art in articles %}
+          <div class="article-item">
+            <div class="article-title">
+              <span class="badge badge-{{ art.risk_level }}">{{ art.risk_level }}</span>
+              <a href="{{ art.url }}" target="_blank" rel="noopener noreferrer">{{ art.title }}</a>
+            </div>
+            <div class="article-meta">
+              <span class="src">{{ art.source }}</span>
+              <span>{{ art.published_at[:16]|replace('T',' ') }}</span>
+              <span>{{ art.category or '-' }}</span>
+              <span>키워드: {{ art.keyword }}</span>
+              {% if art._score %}<span style="color:var(--purple)">점수: {{ art._score }}</span>{% endif %}
+            </div>
+            {% if art.summary_ko %}
+            <div class="article-summary">{{ art.summary_ko }}</div>
+            {% elif art.description %}
+            <div class="article-summary">{{ art.description[:150] }}</div>
+            {% endif %}
+          </div>
+          {% endfor %}
+          {% else %}
+          <p style="color:var(--muted);text-align:center;padding:40px 0">오늘 수집된 기사가 없습니다.</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- 사이드바 -->
+    <div>
+      <!-- 모니터링 키워드 -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header">
+          <span class="card-title">모니터링 키워드</span>
+          <a href="/settings" style="font-size:12px;color:var(--accent)">편집 →</a>
+        </div>
+        <div class="card-body">
+          {% for kw in keywords %}
+          <span class="keyword-tag">{{ kw }}</span>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- 리포트 히스토리 -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header">
+          <span class="card-title">리포트 히스토리</span>
+        </div>
+        <div class="card-body" style="padding:8px 18px">
+          {% for r in reports %}
+          <div class="report-item">
+            <span class="rdate">{{ r.name|replace('_KST','') }}</span>
+            <a class="rlink" href="{{ r.path }}" target="_blank">열기 ↗</a>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- 일별 이력 -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">최근 7일 이력</span>
+        </div>
+        <div class="card-body" style="padding:8px 18px">
+          {% for log in history %}
+          <div class="history-item">
+            <a href="/feed?date={{ log.log_date }}" class="history-date">{{ log.log_date }}</a>
+            <div class="history-counts">
+              {% if log.critical_count > 0 %}<span style="color:#f85149">🔴{{ log.critical_count }}</span>{% endif %}
+              {% if log.high_count > 0 %}<span style="color:#f0883e">🟠{{ log.high_count }}</span>{% endif %}
+              {% if log.medium_count > 0 %}<span style="color:#d29922">🟡{{ log.medium_count }}</span>{% endif %}
+              <span style="color:var(--muted)">총{{ log.total_articles }}</span>
+            </div>
+          </div>
+          {% endfor %}
+          {% if not history %}
+          <p style="color:var(--muted);font-size:12px;padding:8px 0">이력 없음</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
