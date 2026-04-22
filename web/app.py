@@ -27,46 +27,40 @@ def _today():
 
 # ── 헬퍼 ────────────────────────────────────────────────────
 
+_IS_VERCEL = bool(os.environ.get("VERCEL"))
+# Vercel은 프로젝트 디렉토리가 read-only → /tmp 에 저장
+_ENV_PATH = Path("/tmp/.env") if _IS_VERCEL else Path(__file__).parent.parent / ".env"
+_ENV_SOURCE = Path(__file__).parent.parent / ".env"  # 읽기 전용 원본
+
+
 def _load_env() -> dict:
-    env_path = Path(__file__).parent.parent / ".env"
     data = {}
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                data[k.strip()] = v.strip()
+    # Vercel: 원본 .env 먼저 읽고, /tmp/.env 로 덮어씀
+    for path in ([_ENV_SOURCE, _ENV_PATH] if _IS_VERCEL else [_ENV_PATH]):
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    data[k.strip()] = v.strip()
     return data
 
 
 def _save_env(updates: dict):
-    env_path = Path(__file__).parent.parent / ".env"
-    lines = []
-    if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+    # 현재 설정 읽기 (Vercel이면 원본 + /tmp 합산)
+    current = _load_env()
+    current.update(updates)
 
-    updated_keys = set()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k = stripped.split("=", 1)[0].strip()
-            if k in updates:
-                new_lines.append(f"{k}={updates[k]}")
-                updated_keys.add(k)
-                continue
-        new_lines.append(line)
-
-    # 새 키 추가
-    for k, v in updates.items():
-        if k not in updated_keys:
-            new_lines.append(f"{k}={v}")
-
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    lines = [f"{k}={v}" for k, v in current.items()]
+    try:
+        _ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except PermissionError:
+        # 절대 실패하면 안 되는 경우 → /tmp 강제 사용
+        Path("/tmp/.env").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # config 모듈 동적 갱신
     from dotenv import load_dotenv
-    load_dotenv(env_path, override=True)
+    load_dotenv(_ENV_PATH, override=True)
     importlib_reload()
 
 
@@ -199,6 +193,7 @@ def settings():
         env=env,
         saved=saved,
         errors=errors,
+        is_vercel=_IS_VERCEL,
     )
 
 

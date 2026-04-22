@@ -14,6 +14,12 @@
   {% if saved %}
   <div class="alert alert-success">✓ 설정이 저장되었습니다. 다음 수집부터 반영됩니다.</div>
   {% endif %}
+  {% if is_vercel %}
+  <div class="alert" style="background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.3);color:var(--accent)">
+    ℹ Vercel 배포 환경입니다. 저장된 설정은 현재 세션에만 유효하며, 서버 재시작 시 초기화됩니다.
+    영구 적용을 원하면 <strong>Vercel 대시보드 → Project → Settings → Environment Variables</strong>에서 직접 설정하세요.
+  </div>
+  {% endif %}
 
   {% for err in errors %}
   <div class="alert alert-error">{{ err }}</div>
