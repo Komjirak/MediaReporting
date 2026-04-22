@@ -1,8 +1,13 @@
-"""SQLite 데이터베이스 래퍼 - 모든 DB 로직을 여기서 관리"""
-import sqlite3
+"""SQLite / Postgres 이중 모드 데이터베이스 래퍼
+
+환경변수 DATABASE_URL 또는 POSTGRES_URL 이 설정되면 Postgres 사용,
+그렇지 않으면 SQLite(로컬 개발) 사용.
+"""
 import hashlib
 import json
 import logging
+import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -10,105 +15,292 @@ from typing import Optional
 import config
 
 logger = logging.getLogger(__name__)
-
 KST = timezone(timedelta(hours=9))
+
+# ── 백엔드 감지 ───────────────────────────────────────────────
+_DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL", "")
+_USE_PG = bool(_DB_URL)
 
 
 def _kst_now() -> str:
     return datetime.now(KST).isoformat()
 
 
+# ── 연결 래퍼 ────────────────────────────────────────────────
+
+class _ConnWrapper:
+    """SQLite Connection / psycopg2 Connection 을 통일된 인터페이스로 감쌈.
+
+    .execute(sql, params) → self  (chaining 지원)
+    .fetchone()           → dict | None
+    .fetchall()           → list[dict]
+    .rowcount             → int
+    .executescript(sql)   → SQLite-only DDL 전용 (PG는 세미콜론 분리 실행)
+    """
+
+    def __init__(self, raw_conn, is_pg: bool):
+        self._raw = raw_conn
+        self._is_pg = is_pg
+        if is_pg:
+            import psycopg2.extras
+            self._cur = raw_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            self._cur = None  # SQLite uses con.execute() directly
+        self._result = None  # last cursor/result
+
+    # ── query helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _adapt(sql: str, is_pg: bool) -> str:
+        """SQLite ? 플레이스홀더 → Postgres %s 변환 + INSERT OR IGNORE → ON CONFLICT"""
+        if not is_pg:
+            return sql
+        sql = sql.replace("?", "%s")
+        sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+        return sql
+
+    def execute(self, sql: str, params=()):
+        sql = self._adapt(sql, self._is_pg)
+        if self._is_pg:
+            self._cur.execute(sql, params if params else None)
+            self._result = self._cur
+        else:
+            self._result = self._raw.execute(sql, params)
+        return self
+
+    def executemany(self, sql: str, params_list):
+        sql = self._adapt(sql, self._is_pg)
+        if self._is_pg:
+            self._cur.executemany(sql, params_list)
+        else:
+            self._raw.executemany(sql, params_list)
+        return self
+
+    def executescript(self, sql: str):
+        """다중 SQL 문 실행 (DDL 전용)"""
+        if self._is_pg:
+            for stmt in sql.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    self._cur.execute(stmt)
+        else:
+            self._raw.executescript(sql)
+        return self
+
+    def fetchone(self):
+        if self._result is None:
+            return None
+        row = self._result.fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def fetchall(self) -> list:
+        if self._result is None:
+            return []
+        rows = self._result.fetchall()
+        return [dict(r) for r in rows]
+
+    @property
+    def rowcount(self) -> int:
+        if self._result is None:
+            return 0
+        return self._result.rowcount or 0
+
+
+# ── 연결 컨텍스트 ─────────────────────────────────────────────
+
 @contextmanager
 def _conn():
-    con = sqlite3.connect(config.DB_PATH, timeout=10)
-    con.row_factory = sqlite3.Row
-    try:
-        yield con
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
+    if _USE_PG:
+        import psycopg2
+        raw = psycopg2.connect(_DB_URL)
+        wrapper = _ConnWrapper(raw, is_pg=True)
+        try:
+            yield wrapper
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            raw.close()
+    else:
+        raw = sqlite3.connect(config.DB_PATH, timeout=10)
+        raw.row_factory = sqlite3.Row
+        wrapper = _ConnWrapper(raw, is_pg=False)
+        try:
+            yield wrapper
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            raw.close()
+
+
+# ── DB 초기화 ─────────────────────────────────────────────────
+
+_SQLITE_DDL = """
+CREATE TABLE IF NOT EXISTS articles (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    url_hash            TEXT UNIQUE NOT NULL,
+    url                 TEXT NOT NULL,
+    title               TEXT NOT NULL,
+    title_normalized    TEXT NOT NULL,
+    source              TEXT NOT NULL,
+    keyword             TEXT NOT NULL,
+    published_at        TEXT NOT NULL,
+    collected_at        TEXT NOT NULL,
+    summary_ko          TEXT,
+    risk_level          TEXT DEFAULT 'LOW',
+    risk_reason         TEXT,
+    category            TEXT,
+    run_id              TEXT,
+    notified            INTEGER DEFAULT 0,
+    included_in_report  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS report_runs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              TEXT UNIQUE NOT NULL,
+    run_type            TEXT NOT NULL,
+    started_at          TEXT NOT NULL,
+    completed_at        TEXT,
+    article_count       INTEGER DEFAULT 0,
+    new_article_count   INTEGER DEFAULT 0,
+    audit_flags         TEXT,
+    report_html_path    TEXT,
+    report_md_path      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    checked_at  TEXT NOT NULL,
+    flag_type   TEXT NOT NULL,
+    flag_detail TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    resolved    INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_articles_collected  ON articles(collected_at);
+CREATE INDEX IF NOT EXISTS idx_articles_risk       ON articles(risk_level);
+CREATE INDEX IF NOT EXISTS idx_articles_run_id     ON articles(run_id);
+CREATE INDEX IF NOT EXISTS idx_articles_notified   ON articles(notified);
+
+CREATE TABLE IF NOT EXISTS daily_monitoring_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    log_date         TEXT UNIQUE NOT NULL,
+    total_articles   INTEGER DEFAULT 0,
+    critical_count   INTEGER DEFAULT 0,
+    high_count       INTEGER DEFAULT 0,
+    medium_count     INTEGER DEFAULT 0,
+    low_count        INTEGER DEFAULT 0,
+    keywords_coverage TEXT,
+    top_articles     TEXT,
+    audit_flags      TEXT,
+    sources_used     TEXT,
+    run_count        INTEGER DEFAULT 0,
+    notes            TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_log_date ON daily_monitoring_log(log_date);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS daily_log_fts USING fts5(
+    log_date, top_articles, audit_flags, notes,
+    tokenize='unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+_PG_DDL_STMTS = [
+    """CREATE TABLE IF NOT EXISTS articles (
+        id                  SERIAL PRIMARY KEY,
+        url_hash            TEXT UNIQUE NOT NULL,
+        url                 TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        title_normalized    TEXT NOT NULL,
+        source              TEXT NOT NULL,
+        keyword             TEXT NOT NULL,
+        published_at        TEXT NOT NULL,
+        collected_at        TEXT NOT NULL,
+        summary_ko          TEXT,
+        risk_level          TEXT DEFAULT 'LOW',
+        risk_reason         TEXT,
+        category            TEXT,
+        run_id              TEXT,
+        notified            INTEGER DEFAULT 0,
+        included_in_report  INTEGER DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS report_runs (
+        id                  SERIAL PRIMARY KEY,
+        run_id              TEXT UNIQUE NOT NULL,
+        run_type            TEXT NOT NULL,
+        started_at          TEXT NOT NULL,
+        completed_at        TEXT,
+        article_count       INTEGER DEFAULT 0,
+        new_article_count   INTEGER DEFAULT 0,
+        audit_flags         TEXT,
+        report_html_path    TEXT,
+        report_md_path      TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS audit_log (
+        id          SERIAL PRIMARY KEY,
+        run_id      TEXT NOT NULL,
+        checked_at  TEXT NOT NULL,
+        flag_type   TEXT NOT NULL,
+        flag_detail TEXT NOT NULL,
+        severity    TEXT NOT NULL,
+        resolved    INTEGER DEFAULT 0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_articles_collected  ON articles(collected_at)",
+    "CREATE INDEX IF NOT EXISTS idx_articles_risk       ON articles(risk_level)",
+    "CREATE INDEX IF NOT EXISTS idx_articles_run_id     ON articles(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_articles_notified   ON articles(notified)",
+    """CREATE TABLE IF NOT EXISTS daily_monitoring_log (
+        id               SERIAL PRIMARY KEY,
+        log_date         TEXT UNIQUE NOT NULL,
+        total_articles   INTEGER DEFAULT 0,
+        critical_count   INTEGER DEFAULT 0,
+        high_count       INTEGER DEFAULT 0,
+        medium_count     INTEGER DEFAULT 0,
+        low_count        INTEGER DEFAULT 0,
+        keywords_coverage TEXT,
+        top_articles     TEXT,
+        audit_flags      TEXT,
+        sources_used     TEXT,
+        run_count        INTEGER DEFAULT 0,
+        notes            TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_daily_log_date ON daily_monitoring_log(log_date)",
+    """CREATE TABLE IF NOT EXISTS app_settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+]
 
 
 def init_db():
     """테이블 초기화 (없으면 생성)"""
-    with _conn() as con:
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS articles (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            url_hash            TEXT UNIQUE NOT NULL,
-            url                 TEXT NOT NULL,
-            title               TEXT NOT NULL,
-            title_normalized    TEXT NOT NULL,
-            source              TEXT NOT NULL,
-            keyword             TEXT NOT NULL,
-            published_at        TEXT NOT NULL,
-            collected_at        TEXT NOT NULL,
-            summary_ko          TEXT,
-            risk_level          TEXT DEFAULT 'LOW',
-            risk_reason         TEXT,
-            category            TEXT,
-            run_id              TEXT,
-            notified            INTEGER DEFAULT 0,
-            included_in_report  INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS report_runs (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id              TEXT UNIQUE NOT NULL,
-            run_type            TEXT NOT NULL,
-            started_at          TEXT NOT NULL,
-            completed_at        TEXT,
-            article_count       INTEGER DEFAULT 0,
-            new_article_count   INTEGER DEFAULT 0,
-            audit_flags         TEXT,
-            report_html_path    TEXT,
-            report_md_path      TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id      TEXT NOT NULL,
-            checked_at  TEXT NOT NULL,
-            flag_type   TEXT NOT NULL,
-            flag_detail TEXT NOT NULL,
-            severity    TEXT NOT NULL,
-            resolved    INTEGER DEFAULT 0
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_articles_collected  ON articles(collected_at);
-        CREATE INDEX IF NOT EXISTS idx_articles_risk       ON articles(risk_level);
-        CREATE INDEX IF NOT EXISTS idx_articles_run_id     ON articles(run_id);
-        CREATE INDEX IF NOT EXISTS idx_articles_notified   ON articles(notified);
-
-        -- 일단위 모니터링 누적 기록
-        CREATE TABLE IF NOT EXISTS daily_monitoring_log (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            log_date         TEXT UNIQUE NOT NULL,   -- YYYY-MM-DD (KST)
-            total_articles   INTEGER DEFAULT 0,
-            critical_count   INTEGER DEFAULT 0,
-            high_count       INTEGER DEFAULT 0,
-            medium_count     INTEGER DEFAULT 0,
-            low_count        INTEGER DEFAULT 0,
-            keywords_coverage TEXT,   -- JSON: {keyword: {naver: N, google: N}}
-            top_articles     TEXT,    -- JSON: CRITICAL/HIGH 기사 목록 (상위 10건)
-            audit_flags      TEXT,    -- JSON: 당일 감사 플래그 목록
-            sources_used     TEXT,    -- JSON: ["Naver News", "Google News"]
-            run_count        INTEGER DEFAULT 0,  -- 당일 스케줄 실행 횟수
-            notes            TEXT,    -- 수동 메모
-            created_at       TEXT NOT NULL,
-            updated_at       TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_daily_log_date ON daily_monitoring_log(log_date);
-        CREATE VIRTUAL TABLE IF NOT EXISTS daily_log_fts USING fts5(
-            log_date, top_articles, audit_flags, notes,
-            tokenize='unicode61'
-        );
-        """)
-    logger.info("DB initialized: %s", config.DB_PATH)
+    if _USE_PG:
+        with _conn() as con:
+            for stmt in _PG_DDL_STMTS:
+                con.execute(stmt)
+        logger.info("DB initialized: Postgres")
+    else:
+        with _conn() as con:
+            con.executescript(_SQLITE_DDL)
+        logger.info("DB initialized: %s", config.DB_PATH)
 
 
 # ── URL 해시 ─────────────────────────────────────────────────
@@ -131,37 +323,49 @@ def is_duplicate(url: str) -> bool:
 def insert_article(article: dict, run_id: str = "") -> bool:
     """새 기사를 저장. 중복이면 False 반환."""
     h = url_hash(article["url"])
-    try:
-        with _conn() as con:
-            con.execute("""
-            INSERT OR IGNORE INTO articles
-                (url_hash, url, title, title_normalized, source, keyword,
-                 published_at, collected_at, summary_ko, risk_level,
-                 risk_reason, category, run_id, notified, included_in_report)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
-            """, (
-                h,
-                article["url"],
-                article["title"],
-                article.get("title_normalized", article["title"].lower()),
-                article["source"],
-                article.get("keyword", ""),
-                article.get("published_at", _kst_now()),
-                article.get("collected_at", _kst_now()),
-                article.get("summary_ko"),
-                article.get("risk_level", "LOW"),
-                article.get("risk_reason"),
-                article.get("category"),
-                run_id,
-            ))
-        return True
-    except sqlite3.IntegrityError:
-        return False
+
+    if _USE_PG:
+        sql = """
+        INSERT INTO articles
+            (url_hash, url, title, title_normalized, source, keyword,
+             published_at, collected_at, summary_ko, risk_level,
+             risk_reason, category, run_id, notified, included_in_report)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
+        ON CONFLICT (url_hash) DO NOTHING
+        """
+    else:
+        sql = """
+        INSERT OR IGNORE INTO articles
+            (url_hash, url, title, title_normalized, source, keyword,
+             published_at, collected_at, summary_ko, risk_level,
+             risk_reason, category, run_id, notified, included_in_report)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
+        """
+
+    params = (
+        h,
+        article["url"],
+        article["title"],
+        article.get("title_normalized", article["title"].lower()),
+        article["source"],
+        article.get("keyword", ""),
+        article.get("published_at", _kst_now()),
+        article.get("collected_at", _kst_now()),
+        article.get("summary_ko"),
+        article.get("risk_level", "LOW"),
+        article.get("risk_reason"),
+        article.get("category"),
+        run_id,
+    )
+
+    with _conn() as con:
+        result = con.execute(sql, params)
+        return result.rowcount == 1
 
 
 def update_article_summary(url: str, summary_ko: str, risk_level: str,
                             risk_reason: str, category: str):
-    """Claude 요약 결과 업데이트"""
+    """AI 요약 결과 업데이트"""
     h = url_hash(url)
     with _conn() as con:
         con.execute("""
@@ -177,7 +381,7 @@ def get_articles_for_run(run_id: str) -> list[dict]:
             "SELECT * FROM articles WHERE run_id=? ORDER BY risk_level DESC, published_at DESC",
             (run_id,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    return rows
 
 
 def get_articles_without_summary(hours_back: int = 24, limit: int = 200) -> list[dict]:
@@ -189,7 +393,7 @@ def get_articles_without_summary(hours_back: int = 24, limit: int = 200) -> list
             "AND collected_at >= ? ORDER BY risk_level DESC, published_at DESC LIMIT ?",
             (cutoff, limit)
         ).fetchall()
-    return [dict(r) for r in rows]
+    return rows
 
 
 def get_articles_in_window(hours_back: int = 6) -> list[dict]:
@@ -199,7 +403,7 @@ def get_articles_in_window(hours_back: int = 6) -> list[dict]:
             "SELECT * FROM articles WHERE collected_at >= ? ORDER BY published_at DESC",
             (cutoff,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    return rows
 
 
 def get_unnotified_high_risk() -> list[dict]:
@@ -208,28 +412,28 @@ def get_unnotified_high_risk() -> list[dict]:
             "SELECT * FROM articles WHERE notified=0 AND risk_level IN ('CRITICAL','HIGH')"
             " ORDER BY risk_level DESC, collected_at DESC"
         ).fetchall()
-    return [dict(r) for r in rows]
+    return rows
 
 
 def mark_notified(article_ids: list[int]):
     if not article_ids:
         return
-    placeholders = ",".join("?" * len(article_ids))
+    ph = ",".join(["?"] * len(article_ids))
     with _conn() as con:
         con.execute(
-            f"UPDATE articles SET notified=1 WHERE id IN ({placeholders})",
-            article_ids
+            f"UPDATE articles SET notified=1 WHERE id IN ({ph})",
+            tuple(article_ids)
         )
 
 
 def mark_included_in_report(article_ids: list[int]):
     if not article_ids:
         return
-    placeholders = ",".join("?" * len(article_ids))
+    ph = ",".join(["?"] * len(article_ids))
     with _conn() as con:
         con.execute(
-            f"UPDATE articles SET included_in_report=1 WHERE id IN ({placeholders})",
-            article_ids
+            f"UPDATE articles SET included_in_report=1 WHERE id IN ({ph})",
+            tuple(article_ids)
         )
 
 
@@ -256,17 +460,25 @@ def get_recent_run_stats(hours: int = 48) -> list[dict]:
             "SELECT * FROM report_runs WHERE started_at >= ? ORDER BY started_at DESC",
             (cutoff,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    return rows
 
 
 # ── 리포트 런 ─────────────────────────────────────────────────
 
 def create_run(run_id: str, run_type: str) -> str:
-    with _conn() as con:
-        con.execute("""
+    if _USE_PG:
+        sql = """
+        INSERT INTO report_runs (run_id, run_type, started_at)
+        VALUES (?,?,?)
+        ON CONFLICT (run_id) DO NOTHING
+        """
+    else:
+        sql = """
         INSERT OR IGNORE INTO report_runs (run_id, run_type, started_at)
         VALUES (?,?,?)
-        """, (run_id, run_type, _kst_now()))
+        """
+    with _conn() as con:
+        con.execute(sql, (run_id, run_type, _kst_now()))
     return run_id
 
 
@@ -305,17 +517,13 @@ def get_audit_flags_for_run(run_id: str) -> list[dict]:
             "SELECT * FROM audit_log WHERE run_id=? ORDER BY severity DESC",
             (run_id,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    return rows
 
 
 # ── 일단위 모니터링 로그 ──────────────────────────────────────────
 
 def upsert_daily_log(articles: list[dict], audit_flags: list[dict],
                      run_count_delta: int = 1, notes: str = ""):
-    """
-    당일 모니터링 기록을 DB에 누적 저장 (UPSERT).
-    하루에 여러 번 실행되므로 기존 레코드가 있으면 합산 업데이트.
-    """
     today = datetime.now(KST).strftime("%Y-%m-%d")
     now = _kst_now()
 
@@ -324,7 +532,6 @@ def upsert_daily_log(articles: list[dict], audit_flags: list[dict],
         lvl = a.get("risk_level", "LOW")
         counts[lvl] = counts.get(lvl, 0) + 1
 
-    # CRITICAL/HIGH 기사 상위 10건 직렬화
     top = [
         {"title": a["title"], "url": a["url"], "risk_level": a.get("risk_level", "LOW"),
          "source": a.get("source", ""), "published_at": a.get("published_at", ""),
@@ -342,7 +549,6 @@ def upsert_daily_log(articles: list[dict], audit_flags: list[dict],
         ).fetchone()
 
         if existing:
-            # 기존 레코드에 합산
             prev_top = json.loads(existing["top_articles"] or "[]")
             existing_urls = {t["url"] for t in prev_top}
             merged_top = prev_top + [t for t in top if t["url"] not in existing_urls]
@@ -352,7 +558,7 @@ def upsert_daily_log(articles: list[dict], audit_flags: list[dict],
             )[:10]
 
             prev_flags = json.loads(existing["audit_flags"] or "[]")
-            all_flags = prev_flags + audit_flags  # 누적 감사 플래그
+            all_flags = prev_flags + audit_flags
 
             con.execute("""
             UPDATE daily_monitoring_log SET
@@ -399,15 +605,17 @@ def upsert_daily_log(articles: list[dict], audit_flags: list[dict],
                 notes, now, now,
             ))
 
-        # FTS 인덱스 동기화 (독립 FTS 테이블)
-        row = con.execute("SELECT * FROM daily_monitoring_log WHERE log_date=?", (today,)).fetchone()
-        if row:
-            # 기존 FTS 항목 삭제 후 재삽입
-            con.execute("DELETE FROM daily_log_fts WHERE log_date=?", (today,))
-            con.execute(
-                "INSERT INTO daily_log_fts(log_date, top_articles, audit_flags, notes) VALUES (?,?,?,?)",
-                (row["log_date"], row["top_articles"] or "", row["audit_flags"] or "", row["notes"] or "")
-            )
+        # FTS 인덱스 동기화 (SQLite 전용)
+        if not _USE_PG:
+            row = con.execute(
+                "SELECT * FROM daily_monitoring_log WHERE log_date=?", (today,)
+            ).fetchone()
+            if row:
+                con.execute("DELETE FROM daily_log_fts WHERE log_date=?", (today,))
+                con.execute(
+                    "INSERT INTO daily_log_fts(log_date, top_articles, audit_flags, notes) VALUES (?,?,?,?)",
+                    (row["log_date"], row["top_articles"] or "", row["audit_flags"] or "", row["notes"] or "")
+                )
 
     logger.info("[DailyLog] %s 기록 업데이트: 총 %d건", today, len(articles))
 
@@ -420,14 +628,13 @@ def get_daily_log(date_str: str) -> Optional[dict]:
         ).fetchone()
     if not row:
         return None
-    d = dict(row)
     for field in ("keywords_coverage", "top_articles", "audit_flags", "sources_used"):
-        if d.get(field):
+        if row.get(field):
             try:
-                d[field] = json.loads(d[field])
+                row[field] = json.loads(row[field])
             except Exception:
                 pass
-    return d
+    return row
 
 
 def get_daily_logs_range(start_date: str, end_date: str) -> list[dict]:
@@ -439,57 +646,57 @@ def get_daily_logs_range(start_date: str, end_date: str) -> list[dict]:
         ).fetchall()
     result = []
     for row in rows:
-        d = dict(row)
         for field in ("keywords_coverage", "top_articles", "audit_flags", "sources_used"):
-            if d.get(field):
+            if row.get(field):
                 try:
-                    d[field] = json.loads(d[field])
+                    row[field] = json.loads(row[field])
                 except Exception:
                     pass
-        result.append(d)
+        result.append(row)
     return result
 
 
 def search_daily_logs(query: str, limit: int = 20) -> list[dict]:
-    """
-    일간 로그 전문 검색 (FTS5).
-    query: 검색어 (예: "소송", "CRITICAL", "2026-04")
-    """
+    """일간 로그 검색. SQLite는 FTS5, Postgres는 LIKE 폴백."""
     with _conn() as con:
-        try:
-            # FTS5 검색
-            fts_rows = con.execute(
-                "SELECT log_date FROM daily_log_fts WHERE daily_log_fts MATCH ? ORDER BY rank LIMIT ?",
-                (query, limit)
-            ).fetchall()
-            dates = [r["log_date"] for r in fts_rows]
-            if dates:
-                placeholders = ",".join("?" * len(dates))
-                rows = con.execute(
-                    f"SELECT * FROM daily_monitoring_log WHERE log_date IN ({placeholders}) ORDER BY log_date DESC",
-                    dates
+        if not _USE_PG:
+            try:
+                fts_rows = con.execute(
+                    "SELECT log_date FROM daily_log_fts WHERE daily_log_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (query, limit)
                 ).fetchall()
-            else:
-                rows = []
-        except Exception:
-            # FTS 실패 시 LIKE 폴백
-            rows = con.execute("""
-            SELECT * FROM daily_monitoring_log
-            WHERE log_date LIKE ? OR top_articles LIKE ? OR audit_flags LIKE ? OR notes LIKE ?
-            ORDER BY log_date DESC LIMIT ?
-            """, (f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
+                dates = [r["log_date"] for r in fts_rows]
+                if dates:
+                    ph = ",".join(["?"] * len(dates))
+                    rows = con.execute(
+                        f"SELECT * FROM daily_monitoring_log WHERE log_date IN ({ph}) ORDER BY log_date DESC",
+                        tuple(dates)
+                    ).fetchall()
+                else:
+                    rows = []
+            except Exception:
+                rows = _daily_log_like_search(con, query, limit)
+        else:
+            rows = _daily_log_like_search(con, query, limit)
 
     result = []
     for row in rows:
-        d = dict(row)
         for field in ("keywords_coverage", "top_articles", "audit_flags", "sources_used"):
-            if d.get(field):
+            if row.get(field):
                 try:
-                    d[field] = json.loads(d[field])
+                    row[field] = json.loads(row[field])
                 except Exception:
                     pass
-        result.append(d)
+        result.append(row)
     return result
+
+
+def _daily_log_like_search(con, query: str, limit: int) -> list[dict]:
+    return con.execute("""
+    SELECT * FROM daily_monitoring_log
+    WHERE log_date LIKE ? OR top_articles LIKE ? OR audit_flags LIKE ? OR notes LIKE ?
+    ORDER BY log_date DESC LIMIT ?
+    """, (f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
 
 
 def clear_all_articles():
@@ -497,9 +704,10 @@ def clear_all_articles():
     with _conn() as con:
         deleted = con.execute("DELETE FROM articles").rowcount
         con.execute("DELETE FROM daily_monitoring_log")
-        con.execute("DELETE FROM daily_log_fts")
         con.execute("DELETE FROM report_runs")
         con.execute("DELETE FROM audit_log")
+        if not _USE_PG:
+            con.execute("DELETE FROM daily_log_fts")
     logger.info("[DB] 전체 초기화 완료: 기사 %d건 삭제", deleted)
     return deleted
 
@@ -514,14 +722,64 @@ def add_daily_note(date_str: str, note: str):
             updated_at = ?
         WHERE log_date = ?
         """, (note, note, now, date_str))
-        # FTS 재동기화
-        row = con.execute(
-            "SELECT * FROM daily_monitoring_log WHERE log_date=?", (date_str,)
-        ).fetchone()
-        if row:
-            con.execute("DELETE FROM daily_log_fts WHERE log_date=?", (date_str,))
-            con.execute(
-                "INSERT INTO daily_log_fts(log_date, top_articles, audit_flags, notes) VALUES (?,?,?,?)",
-                (row["log_date"], row["top_articles"] or "", row["audit_flags"] or "", row["notes"] or "")
-            )
+        if not _USE_PG:
+            row = con.execute(
+                "SELECT * FROM daily_monitoring_log WHERE log_date=?", (date_str,)
+            ).fetchone()
+            if row:
+                con.execute("DELETE FROM daily_log_fts WHERE log_date=?", (date_str,))
+                con.execute(
+                    "INSERT INTO daily_log_fts(log_date, top_articles, audit_flags, notes) VALUES (?,?,?,?)",
+                    (row["log_date"], row["top_articles"] or "", row["audit_flags"] or "", row["notes"] or "")
+                )
     logger.info("[DailyLog] %s 메모 추가: %s", date_str, note[:50])
+
+
+# ── 앱 설정 (Postgres 영구 저장) ──────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    """app_settings 테이블에서 설정값 조회"""
+    try:
+        with _conn() as con:
+            row = con.execute(
+                "SELECT value FROM app_settings WHERE key=?", (key,)
+            ).fetchone()
+        return row["value"] if row else default
+    except Exception as e:
+        logger.warning("[Settings] get_setting(%s) 실패: %s", key, e)
+        return default
+
+
+def set_setting(key: str, value: str):
+    """app_settings 테이블에 설정값 저장 (UPSERT)"""
+    now = _kst_now()
+    if _USE_PG:
+        sql = """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+        """
+    else:
+        sql = """
+        INSERT OR REPLACE INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        """
+    with _conn() as con:
+        con.execute(sql, (key, value, now))
+
+
+def get_all_settings() -> dict:
+    """app_settings 테이블 전체를 {key: value} dict 로 반환"""
+    try:
+        with _conn() as con:
+            rows = con.execute("SELECT key, value FROM app_settings").fetchall()
+        return {r["key"]: r["value"] for r in rows}
+    except Exception as e:
+        logger.warning("[Settings] get_all_settings() 실패: %s", e)
+        return {}
+
+
+def save_settings(updates: dict):
+    """여러 설정을 한 번에 저장"""
+    for key, value in updates.items():
+        set_setting(key, value)

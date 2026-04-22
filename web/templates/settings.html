@@ -14,10 +14,14 @@
   {% if saved %}
   <div class="alert alert-success">✓ 설정이 저장되었습니다. 다음 수집부터 반영됩니다.</div>
   {% endif %}
-  {% if is_vercel %}
-  <div class="alert" style="background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.3);color:var(--accent)">
-    ℹ Vercel 배포 환경입니다. 저장된 설정은 현재 세션에만 유효하며, 서버 재시작 시 초기화됩니다.
-    영구 적용을 원하면 <strong>Vercel 대시보드 → Project → Settings → Environment Variables</strong>에서 직접 설정하세요.
+  {% if is_vercel and use_pg %}
+  <div class="alert" style="background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.3);color:var(--green)">
+    ✓ Vercel + Postgres 연동 중입니다. 설정은 데이터베이스에 영구 저장되며 재시작 후에도 유지됩니다.
+  </div>
+  {% elif is_vercel %}
+  <div class="alert" style="background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.3);color:#f85149">
+    ⚠ Postgres 미연결 상태입니다. 저장된 설정은 서버 재시작 시 초기화됩니다.
+    영구 저장을 위해 <strong>Vercel 대시보드 → Storage → Postgres</strong>를 연결하세요.
   </div>
   {% endif %}
 
