@@ -19,17 +19,21 @@ a:hover{text-decoration:underline}
 
 /* NAV */
 nav{background:var(--surface);border-bottom:1px solid var(--border);
-    padding:0 24px;display:flex;align-items:center;gap:0;height:52px;position:sticky;top:0;z-index:100}
-.nav-brand{font-weight:700;font-size:16px;color:var(--text);margin-right:32px;white-space:nowrap}
+    padding:0 16px;display:flex;align-items:center;height:52px;
+    position:sticky;top:0;z-index:100;overflow:hidden;gap:8px}
+.nav-brand{font-weight:700;font-size:15px;color:var(--text);white-space:nowrap;
+           flex-shrink:0;margin-right:16px}
 .nav-brand span{color:var(--accent)}
-.nav-links{display:flex;gap:4px}
-.nav-links a{padding:6px 14px;border-radius:6px;color:var(--muted);font-size:13px;transition:.15s}
+.nav-links{display:flex;gap:2px;flex-shrink:0}
+.nav-links a{padding:6px 12px;border-radius:6px;color:var(--muted);
+             font-size:13px;transition:.15s;white-space:nowrap}
 .nav-links a:hover,.nav-links a.active{background:var(--surface2);color:var(--text);text-decoration:none}
-.nav-right{margin-left:auto;display:flex;align-items:center;gap:12px}
-.nav-time{font-size:11px;color:var(--muted)}
+.nav-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.nav-time{font-size:11px;color:var(--muted);white-space:nowrap}
+@media(max-width:640px){.nav-time{display:none}}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:6px;
      border:1px solid var(--border);background:var(--surface2);color:var(--text);
-     cursor:pointer;font-size:13px;transition:.15s}
+     cursor:pointer;font-size:13px;transition:.15s;white-space:nowrap}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
 .btn-primary{background:var(--accent);color:#000;border-color:var(--accent)}
 .btn-primary:hover{opacity:.85;color:#000}
@@ -190,6 +194,7 @@ function updateBar(d){
     detailEl.textContent = d.detail || '';
     const pct = d.total_steps > 0 ? Math.round((d.step_num / d.total_steps) * 100) : 0;
     progEl.style.width = pct + '%';
+    document.getElementById('ps-pct').textContent = pct ? pct+'%' : '';
   } else {
     btn.textContent='▶ 즉시 수집'; btn.disabled=false;
     clearInterval(_pollTimer); _pollTimer=null;
@@ -216,26 +221,17 @@ fetch('/api/run-status').then(r=>r.json()).then(d=>{
 });
 </script>
 <!-- 파이프라인 진행 상태 바 -->
-<div id="pipeline-bar" style="display:none;background:var(--surface);border-bottom:1px solid var(--border);
-     padding:10px 24px;align-items:center;gap:16px;position:sticky;top:52px;z-index:99">
-  <div style="flex:1;min-width:0">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <span id="ps-step" style="font-size:13px;font-weight:600;color:var(--accent)">준비 중</span>
-      <span id="ps-detail" style="font-size:12px;color:var(--muted)"></span>
-    </div>
-    <div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">
-      <div id="ps-prog" style="height:100%;width:0%;background:var(--accent);
-           border-radius:2px;transition:width .4s ease"></div>
-    </div>
+<div id="pipeline-bar" style="display:none;background:var(--surface2);
+     border-bottom:1px solid var(--border);padding:8px 16px;
+     position:sticky;top:52px;z-index:99">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:5px">
+    <span id="ps-step" style="font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap">준비 중</span>
+    <span id="ps-detail" style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    <span id="ps-pct" style="font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap"></span>
   </div>
-  <div style="display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted);white-space:nowrap">
-    <span>1.수집</span><span style="color:var(--border)">→</span>
-    <span>2.중복제거</span><span style="color:var(--border)">→</span>
-    <span>3.분류</span><span style="color:var(--border)">→</span>
-    <span>4.AI요약</span><span style="color:var(--border)">→</span>
-    <span>5.저장</span><span style="color:var(--border)">→</span>
-    <span>6.감사</span><span style="color:var(--border)">→</span>
-    <span>7.리포트</span>
+  <div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden">
+    <div id="ps-prog" style="height:100%;width:0%;background:var(--accent);
+         border-radius:2px;transition:width .5s ease"></div>
   </div>
 </div>
 

@@ -116,10 +116,10 @@
       <div class="card-body">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
           {% set checks = [
-            ('Naver API', env.NAVER_CLIENT_ID),
-            ('Gemini API', env.GEMINI_API_KEY or env.Gemini_API_KEY),
-            ('Slack Webhook', env.SLACK_WEBHOOK_URL),
-            ('Gmail SMTP', env.SMTP_USER),
+            ('Naver API',     env.get('NAVER_CLIENT_ID','')),
+            ('Gemini API',    env.get('GEMINI_API_KEY','') or env.get('Gemini_API_KEY','')),
+            ('Slack Webhook', env.get('SLACK_WEBHOOK_URL','')),
+            ('Gmail SMTP',    env.get('SMTP_USER','')),
           ] %}
           {% for name, val in checks %}
           <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;
